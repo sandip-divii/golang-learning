@@ -1,59 +1,23 @@
-# gin-go-user-api
+# docker-gin-go-user-api
 
-The same user API as `go-user-api`, rebuilt on the **Gin** framework instead of
-`net/http`. Same four layers, same six endpoints, same database — so the only
-thing that changed is the HTTP plumbing. That is the point: it makes the
-framework's contribution visible.
-
-- **Location:** `C:\Users\sandi\IdeaProjects\go-learning\gin-go-user-api`
-- **Database:** MySQL (XAMPP MariaDB on port **3307**, database `go_user_db`)
-- **Port:** **8093** (the net/http version uses 8092, so both can run at once)
+A user CRUD API written in Go, built with Claude as a learning exercise, and this
+week moved into Docker. This README answers the three assignment questions.
 
 ---
 
-## Setup
+## 1. What does it do?
 
-### 1. Database
-
-If you still have `go_user_db` from the net/http project, skip this — the schema
-is identical. Otherwise run `schema.sql` in phpMyAdmin.
-
-### 2. Dependencies
-
-```bat
-cd C:\Users\sandi\IdeaProjects\go-learning\gin-go-user-api
-go mod tidy
-```
-
-This downloads Gin and the MySQL driver and writes `go.sum`.
-
-### 3. Run
-
-```bat
-go run ./cmd/server
-```
-
-Expected output:
+It's a REST API for managing users (create, read, update, delete), built on the
+**Gin** framework and backed by **MySQL**, and it runs entirely in Docker:
 
 ```
-connected to MySQL
-listening on http://localhost:8093
-[GIN-debug] GET    /health   --> ...
+docker compose up --build
 ```
 
-Press `Ctrl+C` to stop — the server drains in-flight requests before exiting.
-
-### 4. Tests
-
-```bat
-go test ./...
-```
-
-No database required: both test files use an in-memory fake repository.
-
----
-
-## Endpoints
+That one command builds the Go binary in a multi-stage Dockerfile, starts a
+MySQL 8 container, loads `schema.sql` into it automatically on first run, waits
+for the database's healthcheck to pass, and then starts the API on
+**http://localhost:8093**.
 
 | Method | Path | Purpose | Success | Errors |
 |---|---|---|---|---|
@@ -64,86 +28,88 @@ No database required: both test files use an in-memory fake repository.
 | PUT | `/users/:id` | Update a user | 200 | 400, 404, 409 |
 | DELETE | `/users/:id` | Delete a user | 200 | 400, 404 |
 
-### Example
-
-```bat
-curl http://localhost:8093/health
-
-curl -X POST http://localhost:8093/users ^
-  -H "Content-Type: application/json" ^
-  -d "{\"name\":\"Sandip\",\"email\":\"sandip@example.com\"}"
-
-curl http://localhost:8093/users
-curl http://localhost:8093/users/1
-
-curl -X PUT http://localhost:8093/users/1 ^
-  -H "Content-Type: application/json" ^
-  -d "{\"name\":\"Sandip M\",\"email\":\"sandip.m@example.com\"}"
-
-curl -X DELETE http://localhost:8093/users/1
-```
-
-In Windows CMD the line-continuation character is `^`. In PowerShell it is a
-backtick, and `curl` is an alias for `Invoke-WebRequest` — use `curl.exe`
-explicitly to get the real tool.
-
----
-
-## Configuration
-
-Both are environment variables, so nothing needs recompiling:
-
-| Variable | Default | Notes |
-|---|---|---|
-| `DB_DSN` | `root:@tcp(127.0.0.1:3307)/go_user_db?parseTime=true` | `parseTime=true` is required, or `created_at` will not scan into `time.Time` |
-| `PORT` | `8093` | |
-
-```bat
-set PORT=9000
-set DB_DSN=root:secret@tcp(127.0.0.1:3306)/go_user_db?parseTime=true
-go run ./cmd/server
-```
-
----
-
-## Layout
-
-```
-gin-go-user-api/
-├── go.mod
-├── schema.sql
-├── cmd/server/main.go                       ← wiring + startup + shutdown
-└── internal/
-    ├── model/user.go                        ← the shared User shape
-    ├── repository/user_repository.go        ← the only file that speaks SQL
-    ├── service/
-    │   ├── user_service.go                  ← business rules
-    │   └── user_service_test.go             ← 8 tests, fake repository
-    └── handler/
-        ├── user_handler.go                  ← the only file that speaks HTTP
-        └── user_handler_test.go             ← 17 endpoint cases via httptest
-```
-
-Requests flow one way and one way only:
+Internally it is four layers, and requests flow one way only:
 
 ```
 Client → Gin → Handler → Service → Repository → MySQL
 ```
 
+- `internal/handler` — the only package that speaks HTTP
+- `internal/service` — business rules (validation, duplicate-email checks)
+- `internal/repository` — the only package that speaks SQL
+- `internal/model` — the shared `User` struct
+
+Configuration comes from environment variables (`DB_DSN`, `PORT`, `GIN_MODE`),
+with a `.env` file for local development (`.env.example` is the template — the
+real `.env` is never committed). Tests (`go test ./...`) need no database at
+all: they run against an in-memory fake repository.
+
 ---
 
-## What Gin changed
+## 2. Where did Claude get it right, and where did I have to fix its output?
 
-| | net/http version | Gin version |
-|---|---|---|
-| Path parameters | Parse the URL string by hand | `c.Param("id")` |
-| Routing | One `HandleFunc` per path, method checked inside | `r.GET`, `r.POST`, … + route groups |
-| JSON decode | `json.NewDecoder(r.Body).Decode(&req)` | `c.ShouldBindJSON(&req)` |
-| JSON encode | Set header, marshal, write | `c.JSON(status, value)` |
-| Input validation | Hand-written `if` checks | `binding:"required,email"` struct tags |
-| Panic safety | Crashes the server | `Recovery()` middleware → 500 |
-| Request logging | Write it yourself | `Logger()` middleware |
+**What Claude got right.** The overall structure held up well: the four-layer
+layout with the repository interface meant the service and handler code didn't
+change at all when we moved from a host database to a containerized one. The
+multi-stage Dockerfile was right on the first pass (build stage on
+`golang:1.22-alpine`, tiny `alpine` runtime stage, static binary with
+`CGO_ENABLED=0`, non-root user), and so were the production touches I wouldn't
+have thought to ask for — graceful shutdown on Ctrl+C, HTTP server timeouts,
+connection-pool limits, and failing fast with a `Ping` at startup instead of on
+the first request.
 
-What Gin did **not** change: the service, repository and model packages are
-byte-for-byte the same idea as before. They never imported `net/http`, so they
-never had to care that the framework changed. That is the payoff of the layering.
+**What I had to fix.** The fixes were mostly about *my machine and my setup*,
+which Claude couldn't know:
+
+- **Port collisions.** The compose file first mapped MySQL to a host port that
+  was already taken on my machine (3306 is in use, and 3307 belongs to my XAMPP
+  MariaDB from the earlier non-Docker version). I changed the mapping to
+  `3308:3306`.
+- **The DSN inside Docker.** The default connection string pointed at
+  `127.0.0.1`, which works when the API runs on the host but not from inside a
+  container — there, "localhost" is the container itself. The compose
+  environment had to use the service name: `tcp(db:3306)`.
+- **Startup ordering.** On the first tries the API container raced MySQL and
+  died before the database was ready. The fix was a proper healthcheck on the
+  `db` service plus `depends_on: condition: service_healthy`, not just plain
+  `depends_on`.
+- **A stale README.** The previous README still described the non-Docker XAMPP
+  setup and even a hardcoded path on my machine — it had been carried over from
+  the earlier project and needed rewriting (this file).
+
+The lesson: Claude is reliable on structure and Go idioms, but everything that
+touches my specific environment — ports, hostnames, what's already running —
+still needs a human to test and correct.
+
+---
+
+## 3. Which Go concept confused me most, and what do I understand now that I didn't on Monday?
+
+**Pointers, and mutexes.**
+
+**Pointers.** On Monday, `*` and `&` felt like noise I copied without
+understanding, and I couldn't have said why one function takes `*model.User`
+while another returns `[]model.User`. Now I can read them: `&` takes the
+address of a value, `*` follows an address back to the value, and the choice is
+about *sharing vs copying*. `Create(ctx, u *model.User)` takes a pointer so the
+repository can write the generated ID back into the caller's struct — with a
+copy, the caller would never see it. `GetByID` returns `*model.User` so it can
+return `nil` when there is no user. And methods use pointer receivers like
+`func (r *MySQLUserRepo) Create(...)` so every call sees the same repo (and the
+same `*sql.DB` pool) instead of a copy of it. The constructor line
+`return &MySQLUserRepo{db: db}` stopped looking mysterious once I understood
+it's just "build the struct, hand back its address."
+
+**Mutexes.** My Monday confusion was more basic than the syntax: I didn't see
+*why* a lock was ever needed — the code runs line by line, so what's there to
+protect? The missing piece was that an HTTP server is concurrent by default:
+Gin handles every request in its own goroutine, so two requests can touch the
+same data at the same instant, and a plain map or counter gets corrupted
+(a data race). A `sync.Mutex` makes goroutines take turns: `Lock()`, touch the
+shared thing, `Unlock()` — usually as `defer mu.Unlock()` right after locking,
+so the lock is released even on an early return or panic. I also now understand
+why *this* project doesn't need one anywhere: the shared state lives in MySQL,
+and `*sql.DB` is already safe for concurrent use — the mutex work is being done
+for me inside the pool and the database. If I ever swap the repository for an
+in-memory `map[int]model.User` implementation, that's exactly where a
+`sync.RWMutex` would have to go.
