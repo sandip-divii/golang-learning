@@ -1,0 +1,39 @@
+# Runs the API and its own MySQL together with one command:
+#   docker compose up --build
+#
+# This gives the project a self-contained database — no dependency on
+# XAMPP or the host MySQL at all.
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"   # dev only — use a real password in production
+      MYSQL_DATABASE: go_user_db
+    ports:
+      - "3308:3306"   # host 3308 -> container 3306 (3306/3307 are taken on this machine)
+    volumes:
+      - db_data:/var/lib/mysql
+      # Runs schema.sql automatically the FIRST time the volume is created
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      # "db" is the service name above — inside the compose network,
+      # containers reach each other by service name, not localhost.
+      DB_DSN: "root:@tcp(db:3306)/go_user_db?parseTime=true"
+      PORT: "8093"
+      GIN_MODE: "release"
+    ports:
+      - "8093:8093"
+    depends_on:
+      db:
+        condition: service_healthy   # wait until MySQL actually answers
+
+volumes:
+  db_data:
