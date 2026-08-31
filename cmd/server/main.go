@@ -45,6 +45,12 @@ func main() {
 	dsn := envOr("DB_DSN", defaultDSN)
 	port := envOr("PORT", defaultPort)
 
+	// Gin already read GIN_MODE in its package init(), which runs before main()
+	// — and therefore before godotenv.Load() above. A value from the .env file
+	// would be silently ignored, so set the mode explicitly now that the
+	// environment is fully populated.
+	gin.SetMode(envOr("GIN_MODE", gin.DebugMode))
+
 	// ---- 2. Database ------------------------------------------------------
 	db, err := openDB(dsn)
 	if err != nil {
