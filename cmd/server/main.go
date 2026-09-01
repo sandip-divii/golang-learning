@@ -23,6 +23,7 @@ import (
 	"github.com/sandip/docker-gin-go-user-api/internal/handler"
 	"github.com/sandip/docker-gin-go-user-api/internal/repository"
 	"github.com/sandip/docker-gin-go-user-api/internal/service"
+	"github.com/sandip/docker-gin-go-user-api/internal/worker"
 )
 
 const (
@@ -62,9 +63,15 @@ func main() {
 	// ---- 3. Dependency injection -----------------------------------------
 	// This is the whole "DI container": three constructor calls you can read.
 	// Spring does this with annotations and reflection; Go does it with code.
+	// The background worker: a buffered channel (the queue) plus one consumer
+	// goroutine draining it. Handlers only enqueue jobs; the actual work runs
+	// here, after the HTTP response has already been sent.
+	jobs := worker.New(100) // room for a burst of 100 queued jobs
+	jobs.Start()            // the consumer goroutine clocks in
+
 	repo := repository.NewMySQLUserRepo(db) // record keeper gets the filing cabinet
 	svc := service.NewUserService(repo)     // manager gets the record keeper
-	h := handler.NewUserHandler(svc)        // receptionist gets the manager
+	h := handler.NewUserHandler(svc, jobs)  // receptionist gets the manager + the kitchen
 
 	// ---- 4. Gin engine ----------------------------------------------------
 	// gin.Default() = a bare engine + two middlewares:
@@ -110,6 +117,13 @@ func main() {
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("forced shutdown: %v", err)
+	}
+
+	// The HTTP server is stopped, so nothing can enqueue anymore. Now close
+	// the queue and let the worker finish whatever jobs are still on it —
+	// order matters: producers must be gone before the channel closes.
+	if err := jobs.Shutdown(shutdownCtx); err != nil {
+		log.Printf("worker: shut down with jobs still pending: %v", err)
 	}
 
 	log.Println("stopped cleanly")

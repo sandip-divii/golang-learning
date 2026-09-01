@@ -14,6 +14,7 @@ import (
 	"github.com/sandip/docker-gin-go-user-api/internal/model"
 	"github.com/sandip/docker-gin-go-user-api/internal/repository"
 	"github.com/sandip/docker-gin-go-user-api/internal/service"
+	"github.com/sandip/docker-gin-go-user-api/internal/worker"
 )
 
 // ---------------------------------------------------------------------------
@@ -83,7 +84,13 @@ func newTestRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
-	NewUserHandler(service.NewUserService(newFakeRepo())).RegisterRoutes(router)
+
+	// A real worker with a small buffer: created but its goroutine started too,
+	// so enqueued jobs are consumed instead of piling up during the test run.
+	jobs := worker.New(16)
+	jobs.Start()
+
+	NewUserHandler(service.NewUserService(newFakeRepo()), jobs).RegisterRoutes(router)
 
 	return router
 }

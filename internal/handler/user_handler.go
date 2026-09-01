@@ -13,16 +13,19 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/sandip/docker-gin-go-user-api/internal/service"
+	"github.com/sandip/docker-gin-go-user-api/internal/worker"
 )
 
-// UserHandler holds the one dependency it needs: the service.
+// UserHandler holds its two dependencies: the service (synchronous work,
+// inside the request) and the worker (asynchronous work, after the response).
 type UserHandler struct {
-	svc *service.UserService
+	svc  *service.UserService
+	jobs *worker.Worker
 }
 
-// NewUserHandler injects the service dependency.
-func NewUserHandler(svc *service.UserService) *UserHandler {
-	return &UserHandler{svc: svc}
+// NewUserHandler injects the service and worker dependencies.
+func NewUserHandler(svc *service.UserService, jobs *worker.Worker) *UserHandler {
+	return &UserHandler{svc: svc, jobs: jobs}
 }
 
 // Request bodies. The `binding:"..."` tags are Gin's validator running at the
@@ -47,6 +50,7 @@ type updateUserRequest struct {
 // version -- but with typed path parameters and route groups.
 func (h *UserHandler) RegisterRoutes(r *gin.Engine) {
 	r.GET("/health", h.Health)
+	r.GET("/jobs/stats", h.JobStats)
 
 	users := r.Group("/users")
 	{
@@ -80,7 +84,24 @@ func (h *UserHandler) Create(c *gin.Context) {
 		return
 	}
 
+	// Producer side of the worker: clip a "send welcome email" ticket onto the
+	// queue and move on. Enqueue never blocks, so the client gets their 201
+	// immediately — the email happens in the background, seconds or
+	// milliseconds later, on the worker's goroutine.
+	h.jobs.Enqueue(worker.Job{
+		Type:   worker.JobWelcomeEmail,
+		UserID: user.ID,
+		Name:   user.Name,
+		Email:  user.Email,
+	})
+
 	c.JSON(http.StatusCreated, user)
+}
+
+// JobStats handles GET /jobs/stats: a live view of the background queue —
+// proof the async flow is real (queued climbs instantly, processed catches up).
+func (h *UserHandler) JobStats(c *gin.Context) {
+	c.JSON(http.StatusOK, h.jobs.Stats())
 }
 
 // List handles GET /users.
