@@ -24,6 +24,10 @@ const (
 	JobWelcomeEmail = "welcome_email"
 )
 
+// jobTimeout is the deadline each job runs under — the background twin of a
+// request's context: a hung send gets cut off instead of blocking the queue.
+const jobTimeout = 5 * time.Second
+
 // Job is one ticket on the rail: everything the worker needs to do the work
 // later, with no access to the original HTTP request (which is long gone by
 // the time the job runs).
@@ -37,8 +41,9 @@ type Job struct {
 // Worker owns the queue and the counters. One instance is created in main()
 // and shared by every handler — same lifetime as the *sql.DB pool.
 type Worker struct {
-	queue chan Job      // the buffered channel: the order rail
-	done  chan struct{} // closed by the consumer goroutine when the rail is drained
+	queue   chan Job      // the buffered channel: the order rail
+	done    chan struct{} // closed by the consumer goroutine when the rail is drained
+	timeout time.Duration // per-job deadline; a field (not the constant) so tests can shrink it
 
 	// Counters are atomic because two goroutines touch them at once:
 	// handlers (producers) increment queued/dropped while the worker
@@ -47,6 +52,7 @@ type Worker struct {
 	queued    atomic.Int64
 	dropped   atomic.Int64
 	processed atomic.Int64
+	failed    atomic.Int64
 }
 
 // New builds a worker with room for `buffer` queued jobs. The buffer is the
@@ -54,8 +60,9 @@ type Worker struct {
 // you want to absorb, not for "infinity".
 func New(buffer int) *Worker {
 	return &Worker{
-		queue: make(chan Job, buffer),
-		done:  make(chan struct{}),
+		queue:   make(chan Job, buffer),
+		done:    make(chan struct{}),
+		timeout: jobTimeout,
 	}
 }
 
@@ -68,7 +75,14 @@ func (w *Worker) Start() {
 	go func() {
 		defer close(w.done) // signal "rail fully drained" to Shutdown
 		for job := range w.queue {
-			w.process(job)
+			// Every job runs under its own deadline — the same discipline as
+			// a request carrying c.Request.Context(). The parent is
+			// context.Background(), NOT the app's signal context, on purpose:
+			// Ctrl+C must not cancel in-flight jobs, it drains them; only a
+			// job overrunning its own deadline gets cut off.
+			ctx, cancel := context.WithTimeout(context.Background(), w.timeout)
+			w.process(ctx, job)
+			cancel()
 		}
 	}()
 }
@@ -91,28 +105,38 @@ func (w *Worker) Enqueue(job Job) bool {
 	}
 }
 
-// process does the actual work for one job. Runs only on the consumer
-// goroutine, one job at a time.
-func (w *Worker) process(job Job) {
+// process does the actual work for one job, under the job's context. Runs
+// only on the consumer goroutine, one job at a time.
+func (w *Worker) process(ctx context.Context, job Job) {
 	start := time.Now()
 
 	switch job.Type {
 	case JobWelcomeEmail:
-		// Compose the mail, then "send" it. The Sleep stands in for the SMTP
-		// round-trip — the network wait a real mail server would cost us, and
-		// exactly the latency we refuse to charge the HTTP client for.
+		// Compose the mail, then "send" it. The timer stands in for the SMTP
+		// round-trip — and it races the job's deadline in a select, exactly
+		// how a context-aware SQL query races a request's cancellation.
 		body := fmt.Sprintf("Hello %s! Your account (id %d) is ready.", job.Name, job.UserID)
-		time.Sleep(100 * time.Millisecond)
-		slog.Info("worker sent welcome email",
-			"email", job.Email,
-			"bytes", len(body),
-			"took", time.Since(start).Round(time.Millisecond))
+
+		select {
+		case <-time.After(100 * time.Millisecond): // simulated send completed
+			w.processed.Add(1)
+			slog.Info("worker sent welcome email",
+				"email", job.Email,
+				"bytes", len(body),
+				"took", time.Since(start).Round(time.Millisecond))
+
+		case <-ctx.Done(): // deadline hit first — abandon the send
+			w.failed.Add(1)
+			slog.Warn("worker job cancelled",
+				"type", job.Type,
+				"user_id", job.UserID,
+				"err", ctx.Err())
+		}
 
 	default:
+		w.failed.Add(1)
 		slog.Error("worker received unknown job type", "type", job.Type)
 	}
-
-	w.processed.Add(1)
 }
 
 // Shutdown closes the queue and waits for the worker to finish the jobs
@@ -138,6 +162,7 @@ type Stats struct {
 	Queued    int64 `json:"queued"`
 	Processed int64 `json:"processed"`
 	Dropped   int64 `json:"dropped"`
+	Failed    int64 `json:"failed"`
 	Pending   int   `json:"pending"`
 }
 
@@ -148,6 +173,7 @@ func (w *Worker) Stats() Stats {
 		Queued:    w.queued.Load(),
 		Processed: w.processed.Load(),
 		Dropped:   w.dropped.Load(),
+		Failed:    w.failed.Load(),
 		Pending:   len(w.queue),
 	}
 }

@@ -41,7 +41,7 @@ database at all: they run against an in-memory fake repository.
 | Method | Path | Purpose | Success | Errors |
 |---|---|---|---|---|
 | GET | `/health` | Liveness probe | 200 | — |
-| GET | `/jobs/stats` | Background queue counters (queued / processed / dropped / pending) | 200 | — |
+| GET | `/jobs/stats` | Background queue counters (queued / processed / dropped / failed / pending) | 200 | — |
 | POST | `/users` | Create a user (also enqueues a welcome-email job) | 201 | 400, 409 |
 | GET | `/users` | List all users | 200 | — |
 | GET | `/users/:id` | Fetch one user | 200 | 400, 404 |

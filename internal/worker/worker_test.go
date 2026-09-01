@@ -39,6 +39,34 @@ func TestWorkerDrainsAllJobsOnShutdown(t *testing.T) {
 	}
 }
 
+// TestJobIsCutOffWhenDeadlineExpires proves each job runs under its own
+// context: with the per-job timeout shrunk below the simulated send latency,
+// the job must be abandoned via ctx.Done() and counted as failed.
+func TestJobIsCutOffWhenDeadlineExpires(t *testing.T) {
+	w := New(1)
+	w.timeout = time.Nanosecond // expires long before the 100ms simulated send
+	w.Start()
+
+	if ok := w.Enqueue(Job{Type: JobWelcomeEmail, UserID: 1, Name: "Slow", Email: "slow@example.com"}); !ok {
+		t.Fatal("enqueue unexpectedly dropped")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := w.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown did not drain in time: %v", err)
+	}
+
+	stats := w.Stats()
+	if stats.Failed != 1 {
+		t.Errorf("expected 1 failed (timed-out) job, got %d", stats.Failed)
+	}
+	if stats.Processed != 0 {
+		t.Errorf("expected 0 processed, got %d", stats.Processed)
+	}
+}
+
 // TestEnqueueDropsWhenQueueIsFull checks the backpressure decision: with no
 // consumer running and the buffer full, Enqueue must refuse instead of block.
 func TestEnqueueDropsWhenQueueIsFull(t *testing.T) {
