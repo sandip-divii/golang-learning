@@ -6,7 +6,7 @@ package handler
 
 import (
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -199,7 +199,10 @@ func (h *UserHandler) fail(c *gin.Context, err error) {
 	default:
 		// Log the detail for us; send the client something generic.
 		// Leaking SQL errors to callers is an information disclosure bug.
-		log.Printf("unexpected error on %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
+		slog.Error("unexpected error",
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path,
+			"err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 	}
 }

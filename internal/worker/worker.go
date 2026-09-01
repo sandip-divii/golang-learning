@@ -13,7 +13,7 @@ package worker
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync/atomic"
 	"time"
 )
@@ -84,7 +84,9 @@ func (w *Worker) Enqueue(job Job) bool {
 		return true
 	default:
 		w.dropped.Add(1)
-		log.Printf("worker: queue full, dropped %s job for user %d", job.Type, job.UserID)
+		slog.Warn("worker queue full, job dropped",
+			"type", job.Type,
+			"user_id", job.UserID)
 		return false
 	}
 }
@@ -101,11 +103,13 @@ func (w *Worker) process(job Job) {
 		// exactly the latency we refuse to charge the HTTP client for.
 		body := fmt.Sprintf("Hello %s! Your account (id %d) is ready.", job.Name, job.UserID)
 		time.Sleep(100 * time.Millisecond)
-		log.Printf("worker: sent welcome email to %s (%d bytes) in %s",
-			job.Email, len(body), time.Since(start).Round(time.Millisecond))
+		slog.Info("worker sent welcome email",
+			"email", job.Email,
+			"bytes", len(body),
+			"took", time.Since(start).Round(time.Millisecond))
 
 	default:
-		log.Printf("worker: unknown job type %q — dropping", job.Type)
+		slog.Error("worker received unknown job type", "type", job.Type)
 	}
 
 	w.processed.Add(1)

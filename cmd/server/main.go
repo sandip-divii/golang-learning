@@ -9,7 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,28 +37,39 @@ func main() {
 	// .env file — real environment variables are set by the platform — so a
 	// missing file is fine, not an error. Values already set in the actual
 	// environment win over the file.
-	if err := godotenv.Load(); err == nil {
-		log.Println("loaded configuration from .env")
-	}
+	loadedEnvFile := godotenv.Load() == nil
 
 	// Environment variables with sane defaults: no code change needed to point
 	// at a different database or port.
 	dsn := envOr("DB_DSN", defaultDSN)
 	port := envOr("PORT", defaultPort)
+	mode := envOr("GIN_MODE", gin.DebugMode)
 
 	// Gin already read GIN_MODE in its package init(), which runs before main()
 	// — and therefore before godotenv.Load() above. A value from the .env file
 	// would be silently ignored, so set the mode explicitly now that the
 	// environment is fully populated.
-	gin.SetMode(envOr("GIN_MODE", gin.DebugMode))
+	gin.SetMode(mode)
+
+	// Structured logging: every line carries key=value attributes a log
+	// aggregator can filter on, instead of prose it would have to parse.
+	// SetDefault makes slog.Info/Error work everywhere without passing the
+	// logger around — and reroutes the old log package into slog too.
+	slog.SetDefault(newLogger(mode))
+
+	if loadedEnvFile {
+		slog.Info("loaded configuration from .env")
+	}
 
 	// ---- 2. Database ------------------------------------------------------
 	db, err := openDB(dsn)
 	if err != nil {
-		log.Fatalf("database: %v", err)
+		// slog has no Fatal on purpose: log the error, then exit explicitly.
+		slog.Error("database connection failed", "err", err)
+		os.Exit(1)
 	}
 	defer db.Close()
-	log.Println("connected to MySQL")
+	slog.Info("connected to MySQL")
 
 	// ---- 3. Dependency injection -----------------------------------------
 	// This is the whole "DI container": three constructor calls you can read.
@@ -100,14 +111,15 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Printf("listening on http://localhost:%s", port)
+		slog.Info("server listening", "url", "http://localhost:"+port)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server: %v", err)
+			slog.Error("server failed", "err", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-ctx.Done() // blocks here until the signal arrives
-	log.Println("shutting down...")
+	slog.Info("shutting down")
 
 	// ---- 7. Graceful shutdown --------------------------------------------
 	// Stop accepting new requests, give in-flight ones up to 10 seconds to
@@ -116,17 +128,27 @@ func main() {
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("forced shutdown: %v", err)
+		slog.Error("forced shutdown", "err", err)
 	}
 
 	// The HTTP server is stopped, so nothing can enqueue anymore. Now close
 	// the queue and let the worker finish whatever jobs are still on it —
 	// order matters: producers must be gone before the channel closes.
 	if err := jobs.Shutdown(shutdownCtx); err != nil {
-		log.Printf("worker: shut down with jobs still pending: %v", err)
+		slog.Warn("worker shut down with jobs still pending", "err", err)
 	}
 
-	log.Println("stopped cleanly")
+	slog.Info("stopped cleanly")
+}
+
+// newLogger picks the slog output format from the Gin mode: human-friendly
+// key=value text while developing, one JSON object per line in release mode —
+// the shape log collectors (CloudWatch, Loki, ELK) expect to ingest.
+func newLogger(mode string) *slog.Logger {
+	if mode == gin.ReleaseMode {
+		return slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	}
+	return slog.New(slog.NewTextHandler(os.Stdout, nil))
 }
 
 // openDB opens the pool and verifies the connection actually works.
